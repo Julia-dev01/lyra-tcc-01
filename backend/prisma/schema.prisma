@@ -1,0 +1,341 @@
+// Alerta Segura - schema Prisma (PostgreSQL)
+// Dados sensiveis (nome, contato, endereco, tipo de violencia, arma, telefone,
+// mensagens de chat) sao persistidos CIFRADOS com AES-256-GCM. Campos de busca
+// sobre dados cifrados usam "blind index" (HMAC-SHA256) para permitir
+// filtragem/estatistica sem revelar o conteudo em texto puro.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum TipoViolencia {
+  FISICA
+  PSICOLOGICA
+  SEXUAL
+  PATRIMONIAL
+  MORAL
+  OUTRA
+  PREFIRO_NAO_INFORMAR
+}
+
+enum AgressorArma {
+  SIM
+  NAO
+  NAO_SEI
+}
+
+enum EmergencyContactType {
+  FAMILIAR
+  ONG
+  POLICIA
+}
+
+enum AlertStatus {
+  NOVO
+  EM_ATENDIMENTO
+  ENCAMINHADO
+  RESOLVIDO
+}
+
+enum AlertPriority {
+  ALTA
+  MEDIA
+  BAIXA
+}
+
+enum ChatStatus {
+  ABERTA
+  EM_ATENDIMENTO
+  ENCERRADA
+}
+
+enum ChatSender {
+  USUARIA
+  ESPECIALISTA
+  SISTEMA
+}
+
+enum AdminPerfil {
+  SUPER_ADMIN
+  ATENDENTE
+  MODERADOR
+}
+
+enum SessionOwner {
+  USER
+  ADMIN
+}
+
+enum DispatchChannel {
+  SMS
+  WHATSAPP
+  EMAIL
+  INTERNAL
+}
+
+enum DispatchStatus {
+  SIMULADO
+  ENVIADO
+  FALHA
+}
+
+enum ContentType {
+  PSICOLOGICA
+  JURIDICA
+  OUTRA
+}
+
+// ---------------------------------------------------------------------------
+// Usuaria
+// ---------------------------------------------------------------------------
+
+model User {
+  id                String    @id @default(uuid()) @db.Uuid
+  nomeCompletoEnc   String    @map("nome_completo")
+  apelidoEnc        String?   @map("apelido")
+  contatoEnc        String    @map("contato")
+  contatoBidx       String    @unique @map("contato_bidx")
+  searchTokens      String[]  @default([]) @map("search_tokens")
+  pinHash           String    @map("pin_hash")
+  enderecoEnc       String    @map("endereco")
+  tipoViolenciaEnc  String    @map("tipo_violencia")
+  tipoViolenciaBidx String    @map("tipo_violencia_bidx")
+  agressorArmaEnc   String    @map("agressor_arma")
+  agressorArmaBidx  String    @map("agressor_arma_bidx")
+  consentimentoLgpd Boolean   @map("consentimento_lgpd")
+  consentimentoData DateTime? @map("consentimento_data")
+  loginFailures     Int       @default(0) @map("login_failures")
+  lockedUntil       DateTime? @map("locked_until")
+  criadoEm          DateTime  @default(now()) @map("criado_em")
+  atualizadoEm      DateTime  @updatedAt @map("atualizado_em")
+  excluidoEm        DateTime? @map("excluido_em")
+
+  emergencyContacts EmergencyContact[]
+  alerts            Alert[]
+  sessions          Session[]
+
+  @@index([searchTokens], type: Gin)
+  @@index([tipoViolenciaBidx])
+  @@index([agressorArmaBidx])
+  @@index([criadoEm])
+  @@map("users")
+}
+
+model EmergencyContact {
+  id        String               @id @default(uuid()) @db.Uuid
+  userId    String               @map("user_id") @db.Uuid
+  nomeEnc   String               @map("nome")
+  telefoneEnc String            @map("telefone")
+  tipo      EmergencyContactType
+  criadoEm  DateTime             @default(now()) @map("criado_em")
+  atualizadoEm DateTime          @updatedAt @map("atualizado_em")
+  excluidoEm DateTime?           @map("excluido_em")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("emergency_contacts")
+}
+
+// ---------------------------------------------------------------------------
+// Alertas de emergencia
+// ---------------------------------------------------------------------------
+
+model Alert {
+  id             String        @id @default(uuid()) @db.Uuid
+  userId         String        @map("user_id") @db.Uuid
+  latitude       Float?
+  longitude      Float?
+  status         AlertStatus   @default(NOVO)
+  prioridade     AlertPriority @default(BAIXA)
+  armaPresente   Boolean       @default(false) @map("arma_presente")
+  atendidoPorId  String?       @map("atendido_por") @db.Uuid
+  encaminhadoPara String?      @map("encaminhado_para")
+  notas          String?
+  criadoEm       DateTime      @default(now()) @map("criado_em")
+  atualizadoEm   DateTime      @updatedAt @map("atualizado_em")
+
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  atendidoPor Admin?          @relation("AlertAtendidoPor", fields: [atendidoPorId], references: [id])
+  dispatches AlertDispatch[]
+
+  @@index([status])
+  @@index([prioridade])
+  @@index([criadoEm])
+  @@map("alerts")
+}
+
+model AlertDispatch {
+  id              String          @id @default(uuid()) @db.Uuid
+  alertId         String          @map("alert_id") @db.Uuid
+  canal           DispatchChannel
+  destinoMascarado String         @map("destino_mascarado")
+  status          DispatchStatus  @default(SIMULADO)
+  providerRef     String?         @map("provider_ref")
+  criadoEm        DateTime        @default(now()) @map("criado_em")
+
+  alert Alert @relation(fields: [alertId], references: [id], onDelete: Cascade)
+
+  @@index([alertId])
+  @@map("alert_dispatches")
+}
+
+// ---------------------------------------------------------------------------
+// Chat anonimo
+// ---------------------------------------------------------------------------
+
+model ChatSession {
+  id          String     @id @default(uuid()) @db.Uuid
+  tokenAnonimo String    @unique @map("token_anonimo")
+  status      ChatStatus @default(ABERTA)
+  adminId     String?    @map("admin_id") @db.Uuid
+  criadoEm    DateTime   @default(now()) @map("criado_em")
+  atualizadoEm DateTime  @updatedAt @map("atualizado_em")
+  encerradoEm DateTime?  @map("encerrado_em")
+
+  admin    Admin?         @relation(fields: [adminId], references: [id])
+  messages ChatMessage[]
+
+  @@index([status])
+  @@index([criadoEm])
+  @@map("chat_sessions")
+}
+
+model ChatMessage {
+  id                  String     @id @default(uuid()) @db.Uuid
+  sessionId           String     @map("session_id") @db.Uuid
+  remetente           ChatSender
+  conteudoCriptografado String   @map("conteudo_criptografado")
+  criadoEm            DateTime   @default(now()) @map("criado_em")
+
+  session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, criadoEm])
+  @@map("chat_messages")
+}
+
+// ---------------------------------------------------------------------------
+// Administracao
+// ---------------------------------------------------------------------------
+
+model Admin {
+  id                String      @id @default(uuid()) @db.Uuid
+  nome              String
+  email             String      @unique
+  senhaHash         String      @map("senha_hash")
+  perfil            AdminPerfil
+  totpSecretEnc     String?     @map("totp_secret")
+  totpHabilitado    Boolean     @default(false) @map("totp_habilitado")
+  ativo             Boolean     @default(true)
+  precisaTrocarSenha Boolean    @default(true) @map("precisa_trocar_senha")
+  primeiroAcessoTokenHash String? @map("primeiro_acesso_token")
+  primeiroAcessoExpira DateTime? @map("primeiro_acesso_expira")
+  loginFailures     Int         @default(0) @map("login_failures")
+  lockedUntil       DateTime?   @map("locked_until")
+  ultimoLogin       DateTime?   @map("ultimo_login")
+  criadoEm          DateTime    @default(now()) @map("criado_em")
+  atualizadoEm      DateTime    @updatedAt @map("atualizado_em")
+  excluidoEm        DateTime?   @map("excluido_em")
+
+  sessions   Session[]
+  chats      ChatSession[]
+  alerts     Alert[]        @relation("AlertAtendidoPor")
+  auditLogs  AuditLog[]
+
+  @@index([perfil])
+  @@map("admins")
+}
+
+model Session {
+  id           String       @id @default(uuid()) @db.Uuid
+  ownerType    SessionOwner @map("owner_type")
+  userId       String?      @map("user_id") @db.Uuid
+  adminId      String?      @map("admin_id") @db.Uuid
+  refreshHash  String       @unique @map("refresh_hash")
+  userAgent    String?      @map("user_agent")
+  expiresAt    DateTime     @map("expires_at")
+  revokedAt    DateTime?    @map("revoked_at")
+  lastUsedAt   DateTime     @default(now()) @map("last_used_at")
+  criadoEm     DateTime     @default(now()) @map("criado_em")
+
+  user  User?  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  admin Admin? @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([adminId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// ---------------------------------------------------------------------------
+// Conteudo e configuracoes
+// ---------------------------------------------------------------------------
+
+model Ngo {
+  id        String    @id @default(uuid()) @db.Uuid
+  nome      String
+  descricao String?
+  telefone  String?
+  cidade    String?
+  uf        String?
+  site      String?
+  ativo     Boolean   @default(true)
+  ordem     Int       @default(0)
+  criadoEm  DateTime  @default(now()) @map("criado_em")
+  atualizadoEm DateTime @updatedAt @map("atualizado_em")
+
+  @@index([uf])
+  @@map("ngos")
+}
+
+model ContentPage {
+  id        String      @id @default(uuid()) @db.Uuid
+  tipo      ContentType
+  titulo    String
+  resumo    String?
+  conteudo  String
+  ordem     Int         @default(0)
+  publicado Boolean     @default(true)
+  criadoEm  DateTime    @default(now()) @map("criado_em")
+  atualizadoEm DateTime @updatedAt @map("atualizado_em")
+
+  @@index([tipo, publicado])
+  @@map("content_pages")
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  atualizadoEm DateTime @updatedAt @map("atualizado_em")
+
+  @@map("settings")
+}
+
+// Log de auditoria imutavel (somente insercao).
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  adminId   String?  @map("admin_id") @db.Uuid
+  acao      String
+  entidade  String
+  entidadeId String? @map("entidade_id")
+  ip        String?
+  userAgent String?  @map("user_agent")
+  detalhes  String?
+  criadoEm  DateTime @default(now()) @map("criado_em")
+
+  admin Admin? @relation(fields: [adminId], references: [id])
+
+  @@index([adminId])
+  @@index([entidade])
+  @@index([criadoEm])
+  @@map("audit_logs")
+}
